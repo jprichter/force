@@ -47,6 +47,12 @@ func printCurrentAccount(cmd *cobra.Command) {
 	}
 	sessionId, _ := cmd.Flags().GetBool("session")
 	tojson, _ := cmd.Flags().GetBool("json")
+	if !sessionId {
+		// The org namespace is loaded on demand for SFDX sessions.
+		if err := force.EnsureUserInfo(); err != nil {
+			ErrorAndExit(err.Error())
+		}
+	}
 	if sessionId {
 		fmt.Println(creds.AccessToken)
 	} else if tojson {
