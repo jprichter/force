@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	forceConfig "github.com/ForceCLI/force/config"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 type SFDXAuth struct {
@@ -798,11 +800,17 @@ func CompleteSFDXSession(creds *ForceSession, aliasHint string) error {
 
 	needsUserInfo := creds.UserInfo == nil || creds.UserInfo.UserId == "" || creds.UserInfo.OrgId == ""
 	if needsUserInfo {
-		userInfo, err := getUserInfoFn(creds)
-		if err != nil {
-			return fmt.Errorf("failed to load user info: %w", err)
+		cacheKey := userInfoCacheKey(creds)
+		if cached, ok := loadCachedUserInfo(cacheKey); ok {
+			creds.UserInfo = &cached
+		} else {
+			userInfo, err := getUserInfoFn(creds)
+			if err != nil {
+				return fmt.Errorf("failed to load user info: %w", err)
+			}
+			creds.UserInfo = &userInfo
+			saveCachedUserInfo(cacheKey, userInfo)
 		}
-		creds.UserInfo = &userInfo
 	}
 
 	if creds.UserInfo != nil {
@@ -828,4 +836,88 @@ func CompleteSFDXSession(creds *ForceSession, aliasHint string) error {
 	}
 
 	return nil
+}
+
+// userInfoCacheTTL bounds how stale a cached profile id or org namespace can
+// get. The user id never changes for an org+username, but an admin can move
+// the user to another profile, and a dev org can register a namespace later.
+const userInfoCacheTTL = 24 * time.Hour
+
+// userInfoCacheEntry is what is stored under ~/.force/userinfo/<key>. It
+// holds only identifiers, never tokens.
+type userInfoCacheEntry struct {
+	CachedAt time.Time `json:"cachedAt"`
+	UserInfo UserInfo  `json:"userInfo"`
+}
+
+// nowFn is swapped in tests.
+var nowFn = time.Now
+
+// userInfoCacheKey identifies an SFDX-backed session for the user info cache.
+// Without it, every command against an SFDX alias whose auth file has no
+// userId makes three extra API calls (userinfo, User, Organization).
+func userInfoCacheKey(creds *ForceSession) string {
+	user := ""
+	if creds.UserInfo != nil {
+		user = creds.UserInfo.UserName
+	}
+	org := strings.TrimSpace(creds.Id)
+	user = strings.ToLower(strings.TrimSpace(user))
+	if org == "" || user == "" {
+		return ""
+	}
+	return org + "_" + user
+}
+
+func userInfoCacheDisabled() bool {
+	return os.Getenv("FORCE_NO_USERINFO_CACHE") != ""
+}
+
+// loadCachedUserInfo returns a cached entry if it exists, parses, is complete
+// and is younger than userInfoCacheTTL. Any problem is a cache miss.
+func loadCachedUserInfo(key string) (UserInfo, bool) {
+	if key == "" || userInfoCacheDisabled() {
+		return UserInfo{}, false
+	}
+	data, err := forceConfig.Config.LoadGlobal("userinfo", key)
+	if err != nil {
+		return UserInfo{}, false
+	}
+	var entry userInfoCacheEntry
+	if json.Unmarshal([]byte(data), &entry) != nil {
+		return UserInfo{}, false
+	}
+	if entry.UserInfo.UserId == "" || entry.UserInfo.OrgId == "" {
+		return UserInfo{}, false
+	}
+	if age := nowFn().Sub(entry.CachedAt); age < 0 || age > userInfoCacheTTL {
+		return UserInfo{}, false
+	}
+	return entry.UserInfo, true
+}
+
+// saveCachedUserInfo is best effort: a read-only home directory must never
+// fail the command.
+func saveCachedUserInfo(key string, info UserInfo) {
+	if key == "" || userInfoCacheDisabled() || info.UserId == "" || info.OrgId == "" {
+		return
+	}
+	body, err := json.Marshal(userInfoCacheEntry{CachedAt: nowFn(), UserInfo: info})
+	if err != nil {
+		return
+	}
+	if err := forceConfig.Config.SaveGlobal("userinfo", key, string(body)); err != nil {
+		Log.Info(fmt.Sprintf("Could not cache user info: %v", err))
+	}
+}
+
+// ClearCachedUserInfo removes the cached user info for a session, e.g. on
+// logout.
+func ClearCachedUserInfo(creds *ForceSession) {
+	if creds == nil {
+		return
+	}
+	if key := userInfoCacheKey(creds); key != "" {
+		_ = forceConfig.Config.DeleteGlobal("userinfo", key)
+	}
 }
