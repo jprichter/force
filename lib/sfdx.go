@@ -796,13 +796,14 @@ func CompleteSFDXSession(creds *ForceSession, aliasHint string) error {
 	}
 	creds.SessionOptions.RefreshMethod = RefreshSFDX
 
-	needsUserInfo := creds.UserInfo == nil || creds.UserInfo.UserId == "" || creds.UserInfo.OrgId == ""
-	if needsUserInfo {
-		userInfo, err := getUserInfoFn(creds)
-		if err != nil {
-			return fmt.Errorf("failed to load user info: %w", err)
+	// The rest of the user info (user id, profile id, namespace) costs three
+	// API calls, and most commands never read it, so it is loaded on demand by
+	// EnsureSessionUserInfo. Only fetch now if we don't even know who the user
+	// is.
+	if creds.UserInfo == nil || strings.TrimSpace(creds.UserInfo.UserName) == "" {
+		if err := loadSessionUserInfo(creds); err != nil {
+			return err
 		}
-		creds.UserInfo = &userInfo
 	}
 
 	if creds.UserInfo != nil {
@@ -827,5 +828,43 @@ func CompleteSFDXSession(creds *ForceSession, aliasHint string) error {
 		creds.SessionOptions.Alias = firstNonEmpty(aliasHint, userNameHint, creds.Id)
 	}
 
+	return nil
+}
+
+// sessionNeedsUserInfo reports whether the session is missing the user info
+// fields that are only available from the API.
+func sessionNeedsUserInfo(creds *ForceSession) bool {
+	return creds.UserInfo == nil || creds.UserInfo.UserId == "" || creds.UserInfo.OrgId == ""
+}
+
+// EnsureSessionUserInfo fetches the user id, profile id and org namespace for
+// sessions that don't have them yet, such as SFDX sessions whose auth file
+// has no userId. It does nothing when they are already known.
+func EnsureSessionUserInfo(creds *ForceSession) error {
+	if creds == nil {
+		return fmt.Errorf("nil force session")
+	}
+	if !sessionNeedsUserInfo(creds) {
+		return nil
+	}
+	return loadSessionUserInfo(creds)
+}
+
+func loadSessionUserInfo(creds *ForceSession) error {
+	var known UserInfo
+	if creds.UserInfo != nil {
+		known = *creds.UserInfo
+	}
+	userInfo, err := getUserInfoFn(creds)
+	if err != nil {
+		return fmt.Errorf("failed to load user info: %w", err)
+	}
+	if strings.TrimSpace(userInfo.UserName) == "" {
+		userInfo.UserName = known.UserName
+	}
+	if strings.TrimSpace(userInfo.OrgId) == "" {
+		userInfo.OrgId = firstNonEmpty(known.OrgId, creds.Id)
+	}
+	creds.UserInfo = &userInfo
 	return nil
 }
