@@ -727,21 +727,67 @@ func (fm *ForceMetadata) GetStatus(id string) (status MetadataDeployStatus, err 
 	return status, err
 }
 
-func (fm *ForceMetadata) CheckStatus(id string) error {
-	for {
-		status, err := fm.GetStatus(id)
+// Status checks for deploys and retrieves start deployPollInitial apart and
+// double after each check, up to deployPollMax. A deploy that finishes in
+// about a second is noticed after about a second instead of after five.
+var (
+	deployPollInitial = 1 * time.Second
+	deployPollMax     = 5 * time.Second
+)
+
+// DeployPollInterval returns how long to wait before the next status check,
+// given how many waits have already happened (0 before the second check).
+func DeployPollInterval(waits int) time.Duration {
+	d := deployPollInitial
+	for i := 0; i < waits && d < deployPollMax; i++ {
+		d *= 2
+	}
+	if d > deployPollMax {
+		d = deployPollMax
+	}
+	return d
+}
+
+// deploySleep waits between status checks. Tests replace it.
+var deploySleep = time.Sleep
+
+// waitForDeploy calls check until the deploy is done or check fails,
+// waiting DeployPollInterval between calls.
+func waitForDeploy(check func() (ForceCheckDeploymentStatusResult, error)) (results ForceCheckDeploymentStatusResult, err error) {
+	for waits := 0; ; waits++ {
+		results, err = check()
+		if err != nil || results.Done {
+			return
+		}
+		Log.Info(results)
+		deploySleep(DeployPollInterval(waits))
+	}
+}
+
+// waitForStatus calls get until the asynchronous operation is done or get
+// fails, waiting DeployPollInterval between calls.
+func waitForStatus(get func() (MetadataDeployStatus, error)) error {
+	for waits := 0; ; waits++ {
+		status, err := get()
 		switch {
 		case err != nil:
 			return err
 		case !status.Done:
-			Log.Info(fmt.Sprintf("Not done yet: %s  Will check again in five seconds.", status.State))
-			time.Sleep(5000 * time.Millisecond)
+			wait := DeployPollInterval(waits)
+			Log.Info(fmt.Sprintf("Not done yet: %s  Will check again in %s.", status.State, wait))
+			deploySleep(wait)
 		case status.State == "Error":
 			return errors.New(status.Message)
 		default:
 			return nil
 		}
 	}
+}
+
+func (fm *ForceMetadata) CheckStatus(id string) error {
+	return waitForStatus(func() (MetadataDeployStatus, error) {
+		return fm.GetStatus(id)
+	})
 }
 
 // NumberTestsRun returns the number of tests that have finished, whether
@@ -1299,14 +1345,9 @@ func (fm *ForceMetadata) DeployZipFile(zipfile []byte, options ForceDeployOption
 	if err != nil {
 		return results, err
 	}
-	for {
-		results, err = fm.CheckDeployStatus(deployId)
-		if err != nil || results.Done {
-			return
-		}
-		Log.Info(results)
-		time.Sleep(5000 * time.Millisecond)
-	}
+	return waitForDeploy(func() (ForceCheckDeploymentStatusResult, error) {
+		return fm.CheckDeployStatus(deployId)
+	})
 }
 
 func deploySoapBody(zipfile []byte, options ForceDeployOptions) string {
@@ -1349,14 +1390,9 @@ func (fm *ForceMetadata) DeployRecentValidation(validationId string) (results Fo
 	if err = xml.Unmarshal(body, &status); err != nil {
 		return
 	}
-	for {
-		results, err = fm.CheckDeployStatus(status.Id)
-		if err != nil || results.Done {
-			return
-		}
-		Log.Info(results)
-		time.Sleep(5000 * time.Millisecond)
-	}
+	return waitForDeploy(func() (ForceCheckDeploymentStatusResult, error) {
+		return fm.CheckDeployStatus(status.Id)
+	})
 }
 
 func (fm *ForceMetadata) RetrieveByPackageXml(package_xml string) (ForceMetadataFiles, []string, error) {
