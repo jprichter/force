@@ -102,6 +102,11 @@ The namespace is the org's `Organization.NamespacePrefix`, recorded when you log
 
 ![](https://raw.githubusercontent.com/dcarroll/dcarroll.github.io/master/images/force/screenshot-191.png)
 
+### sf CLI logins
+If you have no saved force login for an org, `force -a <alias or username>` uses the org's `sf` (or `sfdx`) login instead.
+
+Some sf auth files, often those of scratch orgs, don't record the user id. For those orgs, force looks up the user id, profile and org namespace, and caches them in `~/.force/userinfo/` for 24 hours, so later commands skip those three API calls. The cache holds only identifiers, never tokens. `force logout` removes the entry. To turn the cache off, set `FORCE_NO_USERINFO_CACHE=1`.
+
 ### active
 Active without any arguments will display the currently acctive login that you are using. You can also supply a username argument that will set the active login to the one corresponding to the username argument. Note, just because you set a login as active, does not mean that the token is necessarily valid.
 
