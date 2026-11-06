@@ -31,6 +31,7 @@ func runLogout() {
 		ErrorAndExit("No logins, so a username cannot be assumed.")
 	}
 	username := force.Credentials.UserInfo.UserName
+	ClearCachedUserInfo(force.Credentials)
 	Config.Delete("accounts", username)
 	if active, _ := Config.Load("current", "account"); active == username {
 		Config.Delete("current", "account")
